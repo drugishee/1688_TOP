@@ -1,47 +1,76 @@
-# scraper/search_scraper.py
-import time
-from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
+import csv
+import json
+import logging
+from pathlib import Path
 
-def search_offers(driver, keyword, max_pages=1):
-    offer_urls = []
-    wait = WebDriverWait(driver, 20)
+from selenium import webdriver
+from selenium.webdriver.firefox.options import Options
+from selenium.webdriver.firefox.service import Service
 
-    driver.get("https://www.1688.com/")
-    time.sleep(2)
+from scraper.search_scraper import search_offers
+from scraper.shop_scraper import extract_supplier_and_top
 
-    # Ввод ключевого слова
-    search_input = wait.until(EC.presence_of_element_located((By.ID, "alisearch-input")))
-    search_input.clear()
-    search_input.send_keys(keyword)
+FIREFOX_BINARY = r"C:\\Program Files\\Mozilla Firefox\\firefox.exe"
+GECKODRIVER = r"C:\\geckodriver\\geckodriver.exe"
+PROFILE_PATH = r"C:\\Users\\Admin\\AppData\\Roaming\\Mozilla\\Firefox\\Profiles\\kyazsafw.default-release"
 
-    # Кнопка поиска
-    search_button = driver.find_element(By.CSS_SELECTOR, ".input-button")
-    search_button.click()
+SEEN_FILE = Path("db/seen_suppliers.json")
+RESULTS_JSON = Path("results.json")
+RESULTS_CSV = Path("results.csv")
 
-    # Ожидание результатов
-    wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, "div.search-offer-wrapper")))
+def load_seen():
+    try:
+        with open(SEEN_FILE, "r", encoding="utf-8") as f:
+            return set(json.load(f))
+    except Exception:
+        return set()
 
-    for page in range(max_pages):
-        print(f"🔍 Страница {page + 1}")
-        time.sleep(2)
+def save_seen(seen):
+    SEEN_FILE.parent.mkdir(parents=True, exist_ok=True)
+    with open(SEEN_FILE, "w", encoding="utf-8") as f:
+        json.dump(sorted(seen), f, ensure_ascii=False, indent=2)
 
-        cards = driver.find_elements(By.CSS_SELECTOR, "div.search-offer-wrapper a")
-        for card in cards:
-            url = card.get_attribute("href")
-            if url and "offer" in url:
-                offer_urls.append(url.split("?")[0])
+def save_results(results):
+    with open(RESULTS_JSON, "w", encoding="utf-8") as f:
+        json.dump(results, f, ensure_ascii=False, indent=2)
+    if results:
+        with open(RESULTS_CSV, "w", encoding="utf-8", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=list(results[0].keys()))
+            writer.writeheader()
+            writer.writerows(results)
 
-        # Переход на следующую страницу
-        try:
-            next_btn = driver.find_element(By.XPATH, "//button[contains(text(),'下一页')]")
-            if next_btn.is_enabled():
-                next_btn.click()
-                wait.until(EC.staleness_of(cards[0]))
-            else:
-                break
-        except:
-            break
+def run(keyword, max_pages=1):
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
-    return offer_urls
+    options = Options()
+    options.binary_location = FIREFOX_BINARY
+    options.add_argument(f"--profile={PROFILE_PATH}")
+    driver = webdriver.Firefox(service=Service(GECKODRIVER), options=options)
+
+    seen = load_seen()
+    results = []
+
+    try:
+        urls = search_offers(driver, keyword, max_pages)
+        logging.info("Получено %d ссылок", len(urls))
+        for url in urls:
+            try:
+                info = extract_supplier_and_top(driver, url)
+                if not info:
+                    continue
+                shop_url = info.get("shop_url")
+                if shop_url in seen:
+                    logging.info("Пропуск уже обработанного поставщика: %s", shop_url)
+                    continue
+                results.append(info)
+                seen.add(shop_url)
+            except Exception as e:
+                logging.exception("Ошибка при обработке %s: %s", url, e)
+        save_results(results)
+    finally:
+        save_seen(seen)
+        driver.quit()
+    return results
+
+if __name__ == "__main__":
+    run("секонд хенд", max_pages=1)
